@@ -1,9 +1,70 @@
 import * as path from 'path'
 import * as fs from 'fs'
+import findUp from 'next/dist/compiled/find-up'
 
 // Cache for fs.readdirSync lookup.
 // Prevent multiple blocking IO requests that have already been calculated.
 const fsReadDirSyncCache = {}
+
+// Default page extensions used by Next.js
+const DEFAULT_PAGE_EXTENSIONS = ['tsx', 'ts', 'jsx', 'js']
+
+/**
+ * Get pageExtensions from next.config.js
+ */
+function getPageExtensions(dir: string): string[] {
+  const cacheKey = 'pageExtensions'
+  
+  // Check cache first
+  if ((getPageExtensions as any).cache?.[cacheKey]) {
+    return (getPageExtensions as any).cache[cacheKey]
+  }
+
+  try {
+    // Find next.config.js in the directory tree
+    const configPath = findUp.sync('next.config.js', { cwd: dir })
+    
+    if (!configPath) {
+      return DEFAULT_PAGE_EXTENSIONS
+    }
+
+    // Try to read and parse the config
+    // We use a simple approach to avoid eval/security issues
+    const configContent = fs.readFileSync(configPath, 'utf8')
+    
+    // Look for pageExtensions in the config
+    const pageExtensionsMatch = configContent.match(/pageExtensions\s*:\s*\[([^\]]+)\]/)
+    
+    if (pageExtensionsMatch) {
+      // Extract the array content and parse individual extensions
+      const extensionsStr = pageExtensionsMatch[1]
+      const extensions = extensionsStr
+        .match(/['"]([^'"]+)['"]/g)
+        ?.map(ext => ext.replace(/['"]/g, '')) ?? []
+      
+      if (extensions.length > 0) {
+        if (!(getPageExtensions as any).cache) {
+          (getPageExtensions as any).cache = {}
+        }
+        (getPageExtensions as any).cache[cacheKey] = extensions
+        return extensions
+      }
+    }
+  } catch (e) {
+    // If anything fails, return default extensions
+  }
+
+  return DEFAULT_PAGE_EXTENSIONS
+}
+
+/**
+ * Get the regex pattern for matching page files
+ */
+function getPageExtensionsPattern(dir: string): RegExp {
+  const extensions = getPageExtensions(dir)
+  const extPattern = extensions.map(ext => `\\.${ext}`).join('|')
+  return new RegExp(`(${extPattern})$`)
+}
 
 /**
  * Recursively parse directory for page URLs.
@@ -13,16 +74,18 @@ function parseUrlForPages(urlprefix: string, directory: string) {
     withFileTypes: true,
   })
   const res = []
+  const pageExtPattern = getPageExtensionsPattern(directory)
+  
   fsReadDirSyncCache[directory].forEach((dirent) => {
-    // TODO: this should account for all page extensions
-    // not just js(x) and ts(x)
-    if (/(\.(j|t)sx?)$/.test(dirent.name)) {
-      if (/^index(\.(j|t)sx?)$/.test(dirent.name)) {
-        res.push(
-          `${urlprefix}${dirent.name.replace(/^index(\.(j|t)sx?)$/, '')}`
-        )
+    if (pageExtPattern.test(dirent.name)) {
+      // Check for index files with any configured extension
+      const indexMatch = dirent.name.match(/^index(\.[^.]+)$/)
+      if (indexMatch) {
+        res.push(`${urlprefix}${dirent.name.replace(/^index(\.[^.]+)$/, '')}`)
       }
-      res.push(`${urlprefix}${dirent.name.replace(/(\.(j|t)sx?)$/, '')}`)
+      // Remove the extension
+      const nameWithoutExt = dirent.name.replace(pageExtPattern, '')
+      res.push(`${urlprefix}${nameWithoutExt}`)
     } else {
       const dirPath = path.join(directory, dirent.name)
       if (dirent.isDirectory() && !dirent.isSymbolicLink()) {
@@ -41,14 +104,22 @@ function parseUrlForAppDir(urlprefix: string, directory: string) {
     withFileTypes: true,
   })
   const res = []
+  const pageExtPattern = getPageExtensionsPattern(directory)
+  
   fsReadDirSyncCache[directory].forEach((dirent) => {
-    // TODO: this should account for all page extensions
-    // not just js(x) and ts(x)
-    if (/(\.(j|t)sx?)$/.test(dirent.name)) {
-      if (/^page(\.(j|t)sx?)$/.test(dirent.name)) {
-        res.push(`${urlprefix}${dirent.name.replace(/^page(\.(j|t)sx?)$/, '')}`)
-      } else if (!/^layout(\.(j|t)sx?)$/.test(dirent.name)) {
-        res.push(`${urlprefix}${dirent.name.replace(/(\.(j|t)sx?)$/, '')}`)
+    if (pageExtPattern.test(dirent.name)) {
+      // Check for page files with any configured extension
+      const pageMatch = dirent.name.match(/^page(\.[^.]+)$/)
+      if (pageMatch) {
+        const nameWithoutExt = dirent.name.replace(/^page(\.[^.]+)$/, '')
+        res.push(`${urlprefix}${nameWithoutExt}`)
+      } else {
+        // Check for layout files - they should be ignored
+        const layoutMatch = dirent.name.match(/^layout(\.[^.]+)$/)
+        if (!layoutMatch) {
+          const nameWithoutExt = dirent.name.replace(pageExtPattern, '')
+          res.push(`${urlprefix}${nameWithoutExt}`)
+        }
       }
     } else {
       const dirPath = path.join(directory, dirent.name)
